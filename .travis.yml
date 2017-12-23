@@ -5,7 +5,6 @@ before_script:
 before_install:
   - go get github.com/mitchellh/gox
   - go get github.com/tcnksm/ghr
-  - gox -build-toolchain  
 install:
   # Add Godeps dependencies to GOPATH and PATH
   - export GOPATH="${TRAVIS_BUILD_DIR}/Godeps/_workspace:$GOPATH"
