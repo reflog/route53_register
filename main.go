@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/ec2metadata"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/route53"
@@ -50,7 +51,7 @@ func getDNSHostedZoneID(DNSName string) (string, error) {
 }
 
 func createARecord(hostedZoneID, DNSName, hostName, localIP string) error {
-	sess, err := session.NewSession()
+	sess, err := session.NewSession(&aws.Config{Credentials: credentials.NewEnvCredentials()})
 	if err != nil {
 		return err
 	}
@@ -89,17 +90,62 @@ func createARecord(hostedZoneID, DNSName, hostName, localIP string) error {
 	return err
 }
 
+func createCNAMERecord(hostedZoneID, DNSName, hostName, localName string) error {
+	sess, err := session.NewSession(&aws.Config{Credentials: credentials.NewEnvCredentials()})
+	if err != nil {
+		return err
+	}
+	r53 := route53.New(sess)
+	// This API call creates a new DNS record for this host
+	params := &route53.ChangeResourceRecordSetsInput{
+		ChangeBatch: &route53.ChangeBatch{
+			Changes: []*route53.Change{
+				{
+					Action: aws.String(route53.ChangeActionCreate),
+					ResourceRecordSet: &route53.ResourceRecordSet{
+						Name: aws.String(strings.Split(hostName, ".")[0] + "." + DNSName),
+						// It creates an A record with the IP of the host running the agent
+						Type: aws.String(route53.RRTypeCname),
+						ResourceRecords: []*route53.ResourceRecord{
+							{
+								Value: aws.String(localName),
+							},
+						},
+						SetIdentifier: aws.String(hostName),
+						// TTL=0 to avoid DNS caches
+						TTL:    aws.Int64(defaultTTL),
+						Weight: aws.Int64(defaultWeight),
+					},
+				},
+			},
+			Comment: aws.String("Host CName Record Created"),
+		},
+		HostedZoneId: aws.String(hostedZoneID),
+	}
+	_, err = r53.ChangeResourceRecordSets(params)
+	logErrorNoFatal(err)
+	if err == nil {
+		log.Print("Record " + hostName + " created, resolves to " + localName)
+	}
+	return err
+}
+
 func main() {
 	var err error
 	var sum int
 	var zoneID string
 
-	var hostname = flag.String("hostname", "", "to use for registering the A record")
-	var DNSName = flag.String("zonename", "", "to use for registering the A record")
+	var hostname = flag.String("hostname", "", "which name to use for the new entry")
+	var cname = flag.Bool("cname", false, "wherether to create CNAME record instead of an A record. (will use public hostname instead of IP)")
+	var DNSName = flag.String("zonename", "", "which zone to use for registering records")
 	flag.Parse()
 
-	if *DNSName == "" || *hostname == "" {
-		log.Fatal("Both hostname and zonename params are needed!")
+	if *DNSName == "" {
+		log.Fatal("zonename parameter is required. It sepecifies the zone in which record is added!")
+	}
+
+	if *hostname == "" {
+		log.Fatal("Either host or ip params are needed!")
 	}
 
 	for {
@@ -119,10 +165,19 @@ func main() {
 	logErrorAndFail(err)
 	metadataClient := ec2metadata.New(sess)
 
-	localIP, err := metadataClient.GetMetadata("/local-ipv4")
-	logErrorAndFail(err)
+	if *cname == false {
+		localIP, err := metadataClient.GetMetadata("/local-ipv4")
+		logErrorAndFail(err)
+		if err = createARecord(zoneID, *DNSName, *hostname, localIP); err != nil {
+			log.Print("Error creating host A record")
+		}
+	} else {
+		localName, err := metadataClient.GetMetadata("/public-hostname")
+		logErrorAndFail(err)
+		if err = createCNAMERecord(zoneID, *DNSName, *hostname, localName); err != nil {
+			log.Print("Error creating host CName record")
+		}
 
-	if err = createARecord(zoneID, *DNSName, *hostname, localIP); err != nil {
-		log.Print("Error creating host A record")
 	}
+
 }

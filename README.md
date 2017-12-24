@@ -8,10 +8,12 @@ Tiny Go CLI Program to register EC2 host in Route53
 
 ```
 Usage of ./route53_register:
+  -cname
+        wherether to create CNAME record instead of an A record. (will use public hostname instead of IP)
   -hostname string
-        to use for registering the A record
+        which name to use for the new entry
   -zonename string
-        to use for registering the A record
+        which zone to use for registering records
 ```
 
 # use case
