@@ -3,7 +3,6 @@ package main
 import (
 	"flag"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -13,7 +12,6 @@ import (
 	"github.com/aws/aws-sdk-go/service/route53"
 )
 
-const workerTimeout = 180 * time.Second
 const defaultTTL = 0
 const defaultWeight = 1
 
@@ -50,8 +48,8 @@ func getDNSHostedZoneID(DNSName string) (string, error) {
 	return "", err
 }
 
-func createARecord(hostedZoneID, DNSName, hostName, localIP string) error {
-	sess, err := session.NewSession(&aws.Config{Credentials: credentials.NewEnvCredentials()})
+func createARecord(hostedZoneID, DNSName, hostName, localIP string, logLevel *aws.LogLevelType) error {
+	sess, err := session.NewSession(&aws.Config{Credentials: credentials.NewEnvCredentials(), LogLevel: logLevel})
 	if err != nil {
 		return err
 	}
@@ -61,9 +59,9 @@ func createARecord(hostedZoneID, DNSName, hostName, localIP string) error {
 		ChangeBatch: &route53.ChangeBatch{
 			Changes: []*route53.Change{
 				{
-					Action: aws.String(route53.ChangeActionCreate),
+					Action: aws.String(route53.ChangeActionUpsert),
 					ResourceRecordSet: &route53.ResourceRecordSet{
-						Name: aws.String(strings.Split(hostName, ".")[0] + "." + DNSName),
+						Name: aws.String(hostName + "." + DNSName),
 						// It creates an A record with the IP of the host running the agent
 						Type: aws.String(route53.RRTypeA),
 						ResourceRecords: []*route53.ResourceRecord{
@@ -90,8 +88,8 @@ func createARecord(hostedZoneID, DNSName, hostName, localIP string) error {
 	return err
 }
 
-func createCNAMERecord(hostedZoneID, DNSName, hostName, localName string) error {
-	sess, err := session.NewSession(&aws.Config{Credentials: credentials.NewEnvCredentials()})
+func createCNAMERecord(hostedZoneID, DNSName, hostName, localName string, logLevel *aws.LogLevelType) error {
+	sess, err := session.NewSession(&aws.Config{Credentials: credentials.NewEnvCredentials(), LogLevel: logLevel})
 	if err != nil {
 		return err
 	}
@@ -101,9 +99,9 @@ func createCNAMERecord(hostedZoneID, DNSName, hostName, localName string) error 
 		ChangeBatch: &route53.ChangeBatch{
 			Changes: []*route53.Change{
 				{
-					Action: aws.String(route53.ChangeActionCreate),
+					Action: aws.String(route53.ChangeActionUpsert),
 					ResourceRecordSet: &route53.ResourceRecordSet{
-						Name: aws.String(strings.Split(hostName, ".")[0] + "." + DNSName),
+						Name: aws.String(hostName + "." + DNSName),
 						// It creates an A record with the IP of the host running the agent
 						Type: aws.String(route53.RRTypeCname),
 						ResourceRecords: []*route53.ResourceRecord{
@@ -131,34 +129,45 @@ func createCNAMERecord(hostedZoneID, DNSName, hostName, localName string) error 
 }
 
 func main() {
+	logLevel := aws.LogLevel(aws.LogOff)
 	var err error
 	var sum int
 	var zoneID string
 
 	var hostname = flag.String("hostname", "", "which name to use for the new entry")
-	var cname = flag.Bool("cname", false, "wherether to create CNAME record instead of an A record. (will use public hostname instead of IP)")
+	var cname = flag.Bool("cname", false, "whether to create CNAME record instead of an A record. (will use public hostname instead of IP)")
+	var debug = flag.Bool("debug", false, "enable aws logging")
 	var DNSName = flag.String("zonename", "", "which zone to use for registering records")
+	var zoneIDArg = flag.String("zoneId", "", "route53 zone id which to use for registering records (instead of searching zone by name)")
 	flag.Parse()
 
-	if *DNSName == "" {
-		log.Fatal("zonename parameter is required. It sepecifies the zone in which record is added!")
+	if *debug {
+		logLevel = aws.LogLevel(aws.LogDebugWithRequestErrors | aws.LogDebugWithHTTPBody)
+	}
+
+	if *DNSName == "" && *zoneIDArg == "" {
+		log.Fatal("Either zonename or zoneId parameter is required. It sepecifies the zone in which record is added!")
 	}
 
 	if *hostname == "" {
 		log.Fatal("Either host or ip params are needed!")
 	}
 
-	for {
-		// We try to get the Hosted Zone Id using exponential backoff
-		zoneID, err = getDNSHostedZoneID(*DNSName)
-		if err == nil {
-			break
+	if *zoneIDArg == "" {
+		for {
+			// We try to get the Hosted Zone Id using exponential backoff
+			zoneID, err = getDNSHostedZoneID(*DNSName)
+			if err == nil {
+				break
+			}
+			if sum > 8 {
+				logErrorAndFail(err)
+			}
+			time.Sleep(time.Duration(sum) * time.Second)
+			sum += 2
 		}
-		if sum > 8 {
-			logErrorAndFail(err)
-		}
-		time.Sleep(time.Duration(sum) * time.Second)
-		sum += 2
+	} else {
+		zoneID = "/hostedzone/" + *zoneIDArg
 	}
 
 	sess, err := session.NewSession()
@@ -168,13 +177,13 @@ func main() {
 	if *cname == false {
 		localIP, err := metadataClient.GetMetadata("/local-ipv4")
 		logErrorAndFail(err)
-		if err = createARecord(zoneID, *DNSName, *hostname, localIP); err != nil {
+		if err = createARecord(zoneID, *DNSName, *hostname, localIP, logLevel); err != nil {
 			log.Print("Error creating host A record")
 		}
 	} else {
 		localName, err := metadataClient.GetMetadata("/public-hostname")
 		logErrorAndFail(err)
-		if err = createCNAMERecord(zoneID, *DNSName, *hostname, localName); err != nil {
+		if err = createCNAMERecord(zoneID, *DNSName, *hostname, localName, logLevel); err != nil {
 			log.Print("Error creating host CName record")
 		}
 
